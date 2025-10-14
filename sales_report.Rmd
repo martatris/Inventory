@@ -1,0 +1,569 @@
+---
+title: "Sales Report"
+author: "Buy & Sell Goods App"
+date: "`r format(Sys.time(), '%Y-%m-%d %H:%M:%S')`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    latex_engine: xelatex
+    keep_tex: false
+    pandoc_args: ["--variable", "geometry:landscape"]
+params:
+  sales_data: NULL
+  storage_data: NULL
+  cogs_summary: NULL
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(knitr)
+library(kableExtra)
+library(writexl)
+library(readxl)
+library(forecast)
+```
+
+**Report Generated:** `r params$report_time`
+
+## Executive Summary
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+if (!is.null(params$sales_data) && !is.null(params$storage_data) &&
+    nrow(params$sales_data) > 0 && nrow(params$storage_data) > 0) {
+  total_sales <- sum(params$sales_data$Total, na.rm = TRUE)
+  total_tax <- total_sales * 0.10
+  net_revenue <- total_sales - total_tax
+
+  relevant_items <- unique(params$sales_data$Item)
+  total_items_sold <- length(relevant_items)
+  total_units_sold <- sum(params$sales_data$Quantity, na.rm = TRUE)
+
+  knitr::asis_output(paste0(
+    "**Executive Summary**\n\n",
+    "- **Total Gross Sales**: Rp", format(round(total_sales, 2), big.mark = ",", scientific = FALSE), "\n",
+    "- **Total PPN Collected (10%)**: Rp", format(round(total_tax, 2), big.mark = ",", scientific = FALSE), "\n",
+    "- **Total Net Revenue**: Rp", format(round(net_revenue, 2), big.mark = ",", scientific = FALSE), "\n",
+    "- **Unique Items Sold**: ", total_items_sold, "\n",
+    "- **Total Units Sold**: ", total_units_sold
+  ))
+} else {
+  cat("Not enough data to generate executive summary.")
+}
+```
+
+## Total Sales Summary
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+if (!is.null(params$sales_data) && nrow(params$sales_data) > 0) {
+  total_sales <- sum(params$sales_data$Total, na.rm = TRUE)
+  total_tax <- total_sales * 0.10
+  net_revenue <- total_sales - total_tax
+
+  summary_df <- data.frame(
+    "Total Gross Sales" = sprintf("%.2f", total_sales),
+    "Total PPN Collected (10%)" = sprintf("%.2f", total_tax),
+    "Total Net Revenue" = sprintf("%.2f", net_revenue)
+  )
+  kable(summary_df, caption = "Total Sales Revenue Summary")
+} else {
+  cat("No sales data available.")
+}
+```
+
+## Monthly Sales Overview
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+if (!is.null(params$sales_data) && nrow(params$sales_data) > 0) {
+  monthly_summary <- params$sales_data %>%
+    mutate(Month = format(as.POSIXct(Date), "%Y-%m")) %>%
+    group_by(Month) %>%
+    summarise(
+      `Total Sales` = sum(Total, na.rm = TRUE),
+      `Units Sold` = sum(Quantity, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  kable(monthly_summary, caption = "Monthly Sales Summary", booktabs = TRUE) %>%
+    kable_styling(latex_options = c("striped", "scale_down"))
+}
+```
+
+## Summary of Sold Items by Date and Time
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+if (!is.null(params$sales_data) && nrow(params$sales_data) > 0) {
+  summary_data <- params$sales_data %>%
+    mutate(Date = format(as.POSIXct(Date), "%Y-%m-%d %H:%M:%S")) %>%
+    group_by(Date, Item) %>%
+    summarise(
+      `Quantity Sold` = sum(Quantity, na.rm = TRUE),
+      `Gross Revenue` = sum(Total, na.rm = TRUE),
+      `Tax Collected` = round(`Gross Revenue` * 0.10, 2),
+      `Net Revenue` = round(`Gross Revenue` * 0.90, 2),
+      `Price per Unit` = round(mean(Price, na.rm = TRUE), 2),
+      .groups = "drop"
+    ) %>%
+    arrange(Date)
+
+  kable(summary_data, caption = "Summary of Sold Items by Date")
+}
+```
+
+## Sales by Hour of Day
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+if (!is.null(params$sales_data) && nrow(params$sales_data) > 0) {
+  hourly_summary <- params$sales_data %>%
+    mutate(Hour = format(as.POSIXct(Date), "%H")) %>%
+    group_by(Hour) %>%
+    summarise(`Total Sales` = sum(Total, na.rm = TRUE), .groups = "drop") %>%
+    mutate(Hour = as.numeric(Hour)) %>%
+    arrange(Hour)
+
+  ggplot(hourly_summary, aes(x = Hour, y = `Total Sales`)) +
+    geom_col(fill = "#0072B2") +
+    labs(title = "Sales by Hour of Day", x = "Hour", y = "Total Sales (Rp)") +
+    theme_minimal()
+}
+```
+
+## Detailed Sales Log
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+if (!is.null(params$sales_data) && nrow(params$sales_data) > 0) {
+  detailed_log <- params$sales_data %>%
+    mutate(
+      Timestamp = format(as.POSIXct(Date), "%Y-%m-%d %H:%M:%S"),
+      Tax = round(Total * 0.10, 2),
+      `Net Revenue` = round(Total * 0.90, 2)
+    ) %>%
+    select(Timestamp, Item, Quantity, Price, Total, Tax, `Net Revenue`)
+  
+  kable(detailed_log, caption = "Detailed Sales Log")
+}
+```
+
+\newpage
+
+## Storage Records and Purchases vs Sales (with Net Profit Calculation)
+
+```{r full-summary, echo=FALSE, message=FALSE, warning=FALSE}
+sales_data <- params$sales_data
+storage_data <- params$storage_data
+
+if (is.null(sales_data) || is.null(storage_data) || nrow(sales_data) == 0 || nrow(storage_data) == 0) {
+  cat("## Not enough data to generate full inventory summary.")
+} else {
+  combined_summary <- list()
+
+  for (i in 1:nrow(storage_data)) {
+    row <- storage_data[i, ]
+    combined_summary[[length(combined_summary) + 1]] <- data.frame(
+      Date = format(as.POSIXct(row$Date), "%Y-%m-%d %H:%M:%S"),
+      Item = row$Item,
+      Type = "Stock Added",
+      Quantity = row$Stock_Added,
+      Price = row$Price,
+      Revenue = NA_real_,
+      Cost_per_Unit = round(row$Price, 2),
+      COGS = NA_real_,
+      Tax = NA_real_,
+      Net_Revenue = NA_real_,
+      Net_Profit = NA_real_,
+      stringsAsFactors = FALSE
+    )
+  }
+
+  for (i in 1:nrow(sales_data)) {
+    sale_row <- sales_data[i, ]
+    sale_date <- as.POSIXct(sale_row$Date)
+    sale_qty <- sale_row$Quantity
+    gross_total <- sale_row$Total
+    tax <- 0.10 * gross_total
+    net_revenue <- gross_total - tax
+
+    relevant_stock <- storage_data %>%
+      filter(Item == sale_row$Item & as.POSIXct(Date) <= sale_date)
+
+    if (nrow(relevant_stock) > 0) {
+      total_qty <- sum(relevant_stock$Stock_Added, na.rm = TRUE)
+      total_cost <- sum(relevant_stock$Stock_Added * relevant_stock$Price, na.rm = TRUE)
+      avg_cost <- ifelse(total_qty > 0, total_cost / total_qty, 0)
+    } else {
+      avg_cost <- 0
+    }
+
+    cogs <- sale_qty * avg_cost
+    net_profit <- net_revenue - cogs
+
+    combined_summary[[length(combined_summary) + 1]] <- data.frame(
+      Date = format(sale_date, "%Y-%m-%d %H:%M:%S"),
+      Item = sale_row$Item,
+      Type = "Sale",
+      Quantity = sale_qty,
+      Price = sale_row$Price,
+      Revenue = round(gross_total, 2),
+      Cost_per_Unit = round(avg_cost, 2),
+      COGS = round(cogs, 2),
+      Tax = round(tax, 2),
+      Net_Revenue = round(net_revenue, 2),
+      Net_Profit = round(net_profit, 2),
+      stringsAsFactors = FALSE
+    )
+  }
+
+  final_df <- bind_rows(combined_summary) %>%
+    arrange(as.POSIXct(Date))
+
+  final_df <- final_df %>%
+    rename_with(~ gsub("_", " ", .x))
+
+  stock_added_table <- final_df %>%
+    filter(Type == "Stock Added") %>%
+    select(Date, Item, Quantity, `Cost per Unit`)
+
+  sales_table <- final_df %>%
+    filter(Type == "Sale") %>%
+    select(Date, Item, Quantity, Price, Revenue, Tax, `Net Revenue`, `Cost per Unit`, COGS, `Net Profit`)
+}
+```
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+if (exists("stock_added_table")) {
+  kable(stock_added_table, caption = "Report: Stock Added", booktabs = TRUE, longtable = TRUE) %>%
+    kable_styling(latex_options = c("striped", "scale_down"))
+}
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+if (exists("sales_table")) {
+  kable(sales_table, caption = "Report: Sales Summary", booktabs = TRUE, longtable = TRUE) %>%
+    kable_styling(latex_options = c("striped", "scale_down"))
+}
+```
+
+## Combined Inventory Summary
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+library(dplyr)
+library(knitr)
+library(kableExtra)
+library(scales)
+
+if (exists("final_df") && nrow(final_df) > 0) {
+  final_df_clean <- final_df %>%
+    mutate(across(where(is.numeric), ~ round(., 2)))
+
+  final_df_clean[is.na(final_df_clean)] <- ""
+
+  display_df <- final_df_clean %>%
+    mutate(across(
+      .cols = where(~ all(grepl("^[0-9.,]*$", .x) | .x == "")),
+      .fns = ~ ifelse(.x == "", "", format(as.numeric(.x), big.mark = ",", scientific = FALSE))
+    ))
+
+  kable(display_df, caption = "Combined Inventory Summary", booktabs = TRUE, longtable = TRUE) %>%
+    kable_styling(latex_options = c("striped", "scale_down"))
+}
+```
+
+## Estimated Ending Inventory
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+if (exists("final_df") && nrow(final_df) > 0) {
+  stock_levels <- final_df %>%
+    group_by(Item) %>%
+    summarise(
+      `Stock Added` = sum(ifelse(Type == "Stock Added", Quantity, 0), na.rm = TRUE),
+      `Stock Sold` = sum(ifelse(Type == "Sale", Quantity, 0), na.rm = TRUE),
+      `Stock Remaining` = `Stock Added` - `Stock Sold`,
+      .groups = "drop"
+    ) %>%
+    arrange(desc(`Stock Remaining`))
+
+  kable(stock_levels, caption = "Estimated Ending Inventory", booktabs = TRUE) %>%
+    kable_styling(latex_options = c("striped", "scale_down"))
+}
+```
+
+## Items Sold Without Stock Record
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+if (!is.null(params$sales_data) && !is.null(params$storage_data)) {
+  missing_stock <- setdiff(unique(params$sales_data$Item), unique(params$storage_data$Item))
+
+  if (length(missing_stock) > 0) {
+    knitr::asis_output(paste("**Warning:** The following items were sold but never recorded as stocked:\n\n- ", paste(missing_stock, collapse = "\n- ")))
+  }
+}
+```
+
+## Low Stock Alert (Stock < 5)
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Set the threshold for low stock
+low_stock_threshold <- 3
+
+if (exists("stock_levels") && nrow(stock_levels) > 0) {
+  low_stock <- stock_levels %>%
+    filter(`Stock Remaining` <= low_stock_threshold & `Stock Remaining` > 0) %>%
+    arrange(`Stock Remaining`)
+
+  if (nrow(low_stock) > 0) {
+    kable(low_stock, caption = paste("Items with Stock ≤", low_stock_threshold), booktabs = TRUE) %>%
+      kable_styling(latex_options = c("striped", "scale_down"))
+  } else {
+    knitr::asis_output("**No items are below the low stock threshold.**")
+  }
+} else {
+  knitr::asis_output("**No stock data available for low stock alert.**")
+}
+```
+
+## Sales Over Time
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+df <- params$sales_data
+if (nrow(df) > 0) {
+  df$Date <- as.Date(as.POSIXct(df$Date))
+  
+  summary_df <- df %>%
+    group_by(Date) %>%
+    summarise(Total_Sales = sum(Total, na.rm = TRUE), .groups = "drop")
+  
+  ggplot(summary_df, aes(x = Date, y = Total_Sales)) +
+    geom_line(color = "#0072B2", size = 0.5) +
+    geom_point(color = "#0072B2", size = 2) +
+    geom_smooth(method = "loess", se = FALSE, color = "darkorange", linetype = "dashed", size = 1) +
+    labs(
+      title = "Total Sales Over Time",
+      x = "Date",
+      y = "Total Sales (Rp)"
+    ) +
+    theme_minimal() +
+    scale_y_continuous(labels = scales::comma)
+}
+```
+
+## Sales Forecast (Next 7 Days)
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+library(forecast)
+library(ggplot2)
+library(scales)
+
+min_data_points <- 14
+
+df <- params$sales_data
+if (nrow(df) > 0) {
+  df$Date <- as.Date(as.POSIXct(df$Date))
+
+  summary_df <- df %>%
+    group_by(Date) %>%
+    summarise(Total_Sales = sum(Total, na.rm = TRUE), .groups = "drop") %>%
+    arrange(Date)
+
+  if (nrow(summary_df) >= min_data_points) {
+    ts_data <- ts(summary_df$Total_Sales, frequency = 7)  # assume weekly seasonality
+
+    model <- auto.arima(ts_data)
+    forecasted <- forecast(model, h = 7)  # forecast next 7 days
+
+    autoplot(forecasted) +
+      labs(title = "7-Day Sales Forecast",
+           x = "Date",
+           y = "Forecasted Sales (Rp)") +
+      theme_minimal() +
+      scale_y_continuous(labels = comma)
+  } else {
+    knitr::asis_output(paste0(
+      "**Not enough data to generate forecast.**\n\n",
+      "- Minimum required: ", min_data_points, " days of sales\n",
+      "- Available: ", nrow(summary_df), " days"
+    ))
+  }
+} else {
+  knitr::asis_output("**Sales data not available for forecasting.**")
+}
+```
+
+## Profit Margin Over Time
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+df <- params$cogs_summary
+if (!is.null(df) && nrow(df) > 0) {
+  sales_df <- df[df$Type == "Sale", ]
+  
+  if (nrow(sales_df) > 0) {
+    sales_df$Date <- as.Date(sales_df$Date)
+    sales_df$Profit_Margin <- with(sales_df, ifelse(Revenue > 0, `Net Profit` / Revenue, NA))
+    
+    summary_df <- sales_df %>%
+      group_by(Date) %>%
+      summarise(Avg_Margin = mean(Profit_Margin, na.rm = TRUE), .groups = "drop")
+    
+    ggplot(summary_df, aes(x = Date, y = Avg_Margin)) +
+      geom_line(color = "forestgreen", size = 0.5) +
+      geom_point(color = "forestgreen", size = 2) +
+      geom_smooth(method = "loess", se = FALSE, color = "orange", linetype = "dashed") +
+      scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+      labs(
+        title = "Average Profit Margin Over Time",
+        x = "Date",
+        y = "Profit Margin"
+      ) +
+      theme_minimal()
+  }
+}
+```
+
+## Cumulative Sales and Profit Over Time
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+if (nrow(params$sales_data) > 0) {
+  cum_data <- final_df %>%
+    filter(Type == "Sale") %>%
+    mutate(Date = as.Date(Date)) %>%
+    arrange(Date) %>%
+    group_by(Date) %>%
+    summarise(
+      Revenue = sum(Revenue, na.rm = TRUE),
+      Profit = sum(`Net Profit`, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      `Cumulative Revenue` = cumsum(Revenue),
+      `Cumulative Profit` = cumsum(Profit)
+    )
+
+  ggplot(cum_data, aes(x = Date)) +
+    geom_line(aes(y = `Cumulative Revenue`), color = "blue", size = 0.5) +
+    geom_line(aes(y = `Cumulative Profit`), color = "darkgreen", size = 0.5, linetype = "dashed") +
+    labs(
+      title = "Cumulative Revenue and Profit Over Time",
+      x = "Date", y = "Value (Rp)"
+    ) +
+    theme_minimal() +
+    scale_y_continuous(labels = scales::comma)
+}
+```
+
+## Summary Based on Per Item
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+if (exists("final_df") && nrow(final_df) > 0) {
+  final_numeric <- final_df %>%
+    filter(Type == "Sale") %>%
+    mutate(across(
+      .cols = intersect(c("Quantity", "Revenue", "Tax", "Net Revenue", "COGS", "Net Profit"), names(.)),
+      .fns = ~ as.numeric(.)
+    ))
+
+  per_item_summary <- final_numeric %>%
+    group_by(Item) %>%
+    summarise(
+      `Total Quantity Sold` = sum(Quantity, na.rm = TRUE),
+      `Gross Revenue` = sum(Revenue, na.rm = TRUE),
+      `PPN Collected` = sum(Tax, na.rm = TRUE),
+      `Net Revenue` = sum(`Net Revenue`, na.rm = TRUE),
+      `Total COGS` = sum(COGS, na.rm = TRUE),
+      `Total Net Profit` = sum(`Net Profit`, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  total_row <- per_item_summary %>%
+    summarise(across(where(is.numeric), sum, na.rm = TRUE)) %>%
+    mutate(Item = "Total")
+
+  per_item_summary <- bind_rows(per_item_summary, total_row)
+
+  kable(per_item_summary, caption = "Sales Summary by Item", booktabs = TRUE, longtable = TRUE) %>%
+    kable_styling(latex_options = c("striped", "scale_down"))
+}
+```
+
+## Sales by Category
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+if ("Category" %in% colnames(params$sales_data)) {
+  category_summary <- params$sales_data %>%
+    group_by(Category) %>%
+    summarise(
+      `Total Sales` = sum(Total, na.rm = TRUE),
+      `Units Sold` = sum(Quantity, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    arrange(desc(`Total Sales`))
+
+  kable(category_summary, caption = "Sales Summary by Category", booktabs = TRUE) %>%
+    kable_styling(latex_options = c("striped", "scale_down"))
+}
+```
+
+## Per Unit Sales & Cost Analysis
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+if (exists("final_df")) {
+  unit_economics <- final_df %>%
+    filter(Type == "Sale") %>%
+    group_by(Item) %>%
+    summarise(
+      `Avg Sale Price` = round(mean(Price, na.rm = TRUE), 2),
+      `Avg Cost per Unit` = round(mean(`Cost per Unit`, na.rm = TRUE), 2),
+      `Avg Net Profit per Unit` = round(mean(`Net Profit` / Quantity, na.rm = TRUE), 2),
+      .groups = "drop"
+    )
+
+  kable(unit_economics, caption = "Unit Economics per Item", booktabs = TRUE) %>%
+    kable_styling(latex_options = c("striped", "scale_down"))
+}
+```
+
+## Sales Priced Below Cost
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+if (exists("final_df")) {
+  below_cost_sales <- final_df %>%
+    filter(Type == "Sale", Price < `Cost per Unit`) %>%
+    arrange(desc(`Cost per Unit` - Price))
+
+  if (nrow(below_cost_sales) > 0) {
+    kable(below_cost_sales, caption = "Sales Priced Below Cost", booktabs = TRUE) %>%
+      kable_styling(latex_options = c("striped", "scale_down"))
+  }
+}
+```
+
+## Top 5 Best selling items
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+if (exists("per_item_summary")) {
+  top_items <- per_item_summary %>%
+    filter(Item != "Total") %>%
+    arrange(desc(`Total Net Profit`)) %>%
+    slice_head(n = 5)
+
+  kable(top_items, caption = "Top 5 Most Profitable Items", booktabs = TRUE) %>%
+    kable_styling(latex_options = c("striped", "scale_down"))
+}
+```
+
+## Bottom 5 Least Profitable Items
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+if (exists("per_item_summary")) {
+  bottom_items <- per_item_summary %>%
+    filter(Item != "Total") %>%
+    arrange(`Total Net Profit`) %>%
+    slice_head(n = 5)
+
+  kable(bottom_items, caption = "Bottom 5 Least Profitable Items", booktabs = TRUE) %>%
+    kable_styling(latex_options = c("striped", "scale_down"))
+}
+```
