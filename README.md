@@ -141,4 +141,4 @@ Reactive	Description
 👤 Author
 Developed by: Triston Aloyssius Marta
 📧 tristonmarta@yahoo.com.sg
-💼 Data Science | Analytics | R Shiny Developer
+💼 Data Science | Analytics
