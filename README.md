@@ -11,7 +11,7 @@ It supports **Excel uploads**, **interactive visualizations**, **real-time KPI t
 - Upload Excel files containing sheets:  
   - `sales_data`: Records of items sold  
   - `storage_data`: Inbound stock (purchases or restocks)  
-  - `goods_data` *(optional)*: Static goods master list  
+  - `goods_data` : Static goods master list  
 - Add new storage (inbound) or sale (outbound) records manually  
 - Automatically cleans and normalizes inconsistent column names  
 
