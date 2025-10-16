@@ -141,4 +141,4 @@ Reactive	Description
 👤 Author
 Developed by: Triston Aloyssius Marta
 📧 tristonmarta@yahoo.com.sg
-💼 Data Science | Analytics
+💼 Data Science and Statistics
